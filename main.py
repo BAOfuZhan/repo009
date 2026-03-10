@@ -457,6 +457,7 @@ def login_and_reserve(
 
 
 def main(users, action=False):
+    global MAX_ATTEMPT
     target_dt = _get_beijing_target_from_endtime()
     logging.info(
         f"start time {get_log_time(action)}, action {'on' if action else 'off'}, target_dt {target_dt}"
@@ -480,6 +481,24 @@ def main(users, action=False):
     # 只在 GitHub Actions 模式下执行一次“有策略”的第一次尝试
     strategic_done = False
 
+    # 保存每个配置的初始座位号（优先取 seatid 第一个），用于预热失败后按 +1 递增
+    original_seatids = []
+    for user in users:
+        sid = user.get("seatid")
+        raw_sid = (
+            sid
+            if isinstance(sid, str)
+            else (sid[0] if isinstance(sid, list) and sid else None)
+        )
+        try:
+            original_seatids.append(int(raw_sid) if raw_sid is not None else None)
+        except (TypeError, ValueError):
+            logging.warning(
+                f"[seat-increment] Invalid seatid {raw_sid}, skip auto-increment for this config"
+            )
+            original_seatids.append(None)
+    seat_offset = 0
+
     while True:
         # 使用逻辑时间 _now(action)，在 GitHub Actions 下就是北京时间
         current_time = get_hms(action)
@@ -497,13 +516,27 @@ def main(users, action=False):
             )
             strategic_done = True
         else:
-            # 后续尝试使用原有逻辑
-            # try:
+            # 预热结束后仍未成功：未成功配置按座位号 +1 继续尝试（每轮 +1）
+            if success_list is not None and sum(success_list) < today_reservation_num:
+                seat_offset += 1
+                for i, user in enumerate(users):
+                    if not success_list[i] and original_seatids[i] is not None:
+                        new_seat = str(original_seatids[i] + seat_offset)
+                        user["seatid"] = [new_seat]
+                        logging.info(
+                            f"[seat-increment] Config {i}: try seat {new_seat} "
+                            f"(base {original_seatids[i]} + offset {seat_offset})"
+                        )
+
+                # 递增模式下每个座位只提交一次，失败就下一轮换座位
+                MAX_ATTEMPT = 1
+                if sessions is not None:
+                    for s_obj in sessions:
+                        if s_obj is not None:
+                            s_obj.max_attempt = 1
             success_list = login_and_reserve(
                 users, usernames, passwords, action, success_list, sessions
             )
-            # except Exception as e:
-            #     print(f"An error occurred: {e}")
 
         print(
             f"attempt time {attempt_times}, time now {current_time}, success list {success_list}"
