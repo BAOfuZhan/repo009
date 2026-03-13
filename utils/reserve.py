@@ -6,6 +6,7 @@ import time
 import logging
 import datetime
 import os
+from concurrent.futures import ThreadPoolExecutor
 from urllib3.exceptions import InsecureRequestWarning
 
 # Load environment variables from .env file
@@ -234,14 +235,21 @@ class reserve:
 
     def _resolve_slide_captcha(self):
         """滑块验证码求解。"""
-        logging.info(f"Start to resolve slide captcha token")
-        captcha_token, bg, tp = self.get_slide_captcha_data()
-        logging.info(f"Successfully get prepared captcha_token {captcha_token}")
-        logging.info(f"Captcha Image URL-small {tp}, URL-big {bg}")
-        x = self.x_distance(bg, tp)
-        logging.info(f"Successfully calculate the captcha distance {x}")
-
-        return self._submit_captcha("slide", captcha_token, [{"x": x}])
+        start = time.perf_counter()
+        logging.info("Start to resolve slide captcha token")
+        try:
+            captcha_token, bg, tp = self.get_slide_captcha_data()
+            logging.info(f"Successfully get prepared captcha_token {captcha_token}")
+            logging.info(f"Captcha Image URL-small {tp}, URL-big {bg}")
+            x = self.x_distance(bg, tp)
+            logging.info(f"Successfully calculate the captcha distance {x}")
+            result = self._submit_captcha("slide", captcha_token, [{"x": x}])
+            cost = (time.perf_counter() - start) * 1000
+            logging.info(f"Slide captcha resolved in {cost:.0f}ms")
+            return result
+        except Exception as e:
+            logging.warning(f"Slide captcha resolve failed: {e}")
+            return ""
 
     def _resolve_textclick_captcha(self):
         """选字验证码求解。"""
@@ -286,6 +294,7 @@ class reserve:
             f"https://captcha.chaoxing.com/captcha/check/verification/result",
             params=params,
             headers=self.headers,
+            timeout=(1.5, 3),
         )
         text = response.text.replace(
             "jQuery33109180509737430778_1716381333117(", ""
@@ -496,11 +505,16 @@ class reserve:
             "d": "a",
             "b": "a",
         }
-        response = self.requests.get(url=url, params=params, headers=self.headers)
+        response = self.requests.get(
+            url=url,
+            params=params,
+            headers=self.headers,
+            timeout=(1.5, 3),
+        )
         content = response.text
 
         data = content.replace(
-            "jQuery33107685004390294206_1716461324846(", ")"
+            "jQuery33107685004390294206_1716461324846(", ""
         ).replace(")", "")
         data = json.loads(data)
         captcha_token = data["token"]
@@ -511,8 +525,6 @@ class reserve:
     def x_distance(self, bg, tp):
         import numpy as np
         import cv2
-        import os
-        import time as _time
 
         def cut_slide(slide):
             slider_array = np.frombuffer(slide, np.uint8)
@@ -538,24 +550,28 @@ class reserve:
             "Upgrade-Insecure-Requests": "1",
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         }
-        bgc = self.requests.get(bg, headers=c_captcha_headers)
-        tpc = self.requests.get(tp, headers=c_captcha_headers)
-        bg_bytes, tp_bytes = bgc.content, tpc.content
+        def _download_image_bytes(url: str) -> bytes:
+            last_error = None
+            for _ in range(2):
+                try:
+                    resp = self.requests.get(
+                        url,
+                        headers=c_captcha_headers,
+                        timeout=(1.5, 3),
+                    )
+                    if resp.content:
+                        return resp.content
+                except requests.RequestException as e:
+                    last_error = e
+            if last_error:
+                raise last_error
+            raise RuntimeError(f"Empty captcha image response: {url}")
 
-        # 调试：把当前验证码图片保存到本地，方便人工查看和调试
-        try:
-            ts = int(_time.time() * 1000)
-            debug_dir = os.path.join(os.path.dirname(__file__), "..", "captcha_debug")
-            os.makedirs(debug_dir, exist_ok=True)
-            bg_path = os.path.join(debug_dir, f"bg_{ts}.jpg")
-            tp_path = os.path.join(debug_dir, f"tp_{ts}.png")
-            with open(bg_path, "wb") as f:
-                f.write(bg_bytes)
-            with open(tp_path, "wb") as f:
-                f.write(tp_bytes)
-            logging.info(f"Saved captcha images to {bg_path} and {tp_path}")
-        except Exception as e:
-            logging.warning(f"Failed to save captcha images: {e}")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            bg_future = pool.submit(_download_image_bytes, bg)
+            tp_future = pool.submit(_download_image_bytes, tp)
+            bg_bytes = bg_future.result()
+            tp_bytes = tp_future.result()
 
         bg_img = cv2.imdecode(np.frombuffer(bg_bytes, np.uint8), cv2.IMREAD_COLOR)
         tp_img = cut_slide(tp_bytes)

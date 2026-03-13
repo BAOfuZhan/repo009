@@ -105,7 +105,10 @@
         "burst_offsets_ms": [422, 815, 1180],
 
         "_comment_token_fetch_delay_ms": "[仅 mode=C] 目标时间后多少毫秒发起 GET 取 token。连接已预热，实际延迟仅为数据传输时间。建议 0~100。",
-        "token_fetch_delay_ms": 9
+        "token_fetch_delay_ms": 9,
+
+        "_comment_captcha_parallel_preheat": "验证码并发预热开关：true=并发预热前两份验证码，false=串行预热。",
+        "captcha_parallel_preheat": true
     },
 
     "_comment_tulingcloud": "图灵云打码平台配置（可选，用于本地开发测试，GitHub Actions 中从 secrets 读取）",

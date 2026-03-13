@@ -73,6 +73,7 @@ RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 # True：每一轮都会重新创建会话并登录（原有行为）；
 # False：每个账号只在第一次需要时登录一次，后续循环复用同一个会话。
 RELOGIN_EVERY_LOOP = True
+STRATEGY_CAPTCHA_PARALLEL_PREHEAT = True
 
 
 def _get_beijing_target_from_endtime() -> datetime.datetime:
@@ -242,36 +243,163 @@ def strategic_first_attempt(
             time.sleep(0.1)
 
         captcha1 = captcha2 = captcha3 = ""
+        PREHEAT_MIN_BUDGET_SECONDS = 3.0
+        PREHEAT_WATCHDOG_SECONDS = 5.0
+        PREHEAT_MAX_RESEND = 3
+
+        def _remaining_budget_seconds(deadline_dt) -> float:
+            return (deadline_dt - _beijing_now()).total_seconds()
+
+        def _resolve_captcha_with_deadline(
+            captcha_type: str,
+            name: str,
+            deadline_dt,
+            min_retry_window_s: float = 1.2,
+            solver=None,
+        ) -> str:
+            solver_obj = solver or s
+            if _beijing_now() >= deadline_dt:
+                logging.warning(
+                    f"[strategic] Skip pre-resolving {name} {captcha_type} captcha: reached deadline {deadline_dt}"
+                )
+                return ""
+
+            resend_count = 0
+            while resend_count <= PREHEAT_MAX_RESEND and _beijing_now() < deadline_dt:
+                attempt_start = time.perf_counter()
+                captcha = solver_obj.resolve_captcha(captcha_type)
+                elapsed_s = time.perf_counter() - attempt_start
+                if captcha:
+                    if elapsed_s >= PREHEAT_WATCHDOG_SECONDS:
+                        logging.warning(
+                            f"[strategic] {name} {captcha_type} captcha resolved after slow attempt ({elapsed_s:.2f}s)"
+                        )
+                    return captcha
+
+                remain_s = (deadline_dt - _beijing_now()).total_seconds()
+                if remain_s <= 0:
+                    break
+
+                if elapsed_s >= PREHEAT_WATCHDOG_SECONDS:
+                    resend_count += 1
+                    if resend_count > PREHEAT_MAX_RESEND or remain_s <= min_retry_window_s:
+                        logging.warning(
+                            f"[strategic] {name} {captcha_type} captcha watchdog timeout {elapsed_s:.2f}s; stop resend (remain {remain_s:.2f}s, resend={resend_count - 1})"
+                        )
+                        break
+                    logging.warning(
+                        f"[strategic] {name} {captcha_type} captcha not ready in {PREHEAT_WATCHDOG_SECONDS:.0f}s (actual {elapsed_s:.2f}s), resend now ({resend_count}/{PREHEAT_MAX_RESEND})"
+                    )
+                    continue
+
+                if remain_s > min_retry_window_s:
+                    resend_count += 1
+                    if resend_count > PREHEAT_MAX_RESEND:
+                        break
+                    logging.warning(
+                        f"[strategic] {name} {captcha_type} captcha failed or empty, retrying once more (remain {remain_s:.2f}s, resend={resend_count}/{PREHEAT_MAX_RESEND})"
+                    )
+                    continue
+
+                logging.warning(
+                    f"[strategic] {name} {captcha_type} captcha failed or empty, no retry due to tight deadline (remain {remain_s:.2f}s)"
+                )
+                break
+
+            return ""
+
+        def _fill_captcha_slots(captcha_values: list[str]) -> tuple[str, str, str]:
+            available = [c for c in captcha_values if c]
+            if not available:
+                return "", "", ""
+            while len(available) < 3:
+                available.append(available[-1])
+            return available[0], available[1], available[2]
+
+        def _build_parallel_solver():
+            worker_solver = reserve(
+                sleep_time=SLEEPTIME,
+                max_attempt=MAX_ATTEMPT,
+                enable_slider=ENABLE_SLIDER,
+                enable_textclick=ENABLE_TEXTCLICK,
+                reserve_next_day=RESERVE_NEXT_DAY,
+            )
+            worker_solver.requests.cookies.update(s.requests.cookies)
+            worker_solver.requests.headers.update(s.requests.headers)
+            return worker_solver
+
         # 根据开关决定是否预热验证码
         if ENABLE_SLIDER:
-            # 滑块验证：预先获取三份 validate
-            captcha1 = s.resolve_captcha("slide")
-            if not captcha1:
-                logging.warning(
-                    "[strategic] First slider captcha failed or empty, retrying once more"
-                )
-                captcha1 = s.resolve_captcha("slide")
-            logging.info(f"[strategic] Pre-resolved slider captcha1: {captcha1}")
+            # 滑块验证：预算充足时尽量取三份；预算 < 3s 时按“至少保证一份可提交”收敛。
+            slider_captchas: list[str] = []
 
-            captcha2 = s.resolve_captcha("slide")
-            if not captcha2:
-                logging.warning(
-                    "[strategic] Second slider captcha failed or empty, retrying once more"
-                )
-                captcha2 = s.resolve_captcha("slide")
-            logging.info(f"[strategic] Pre-resolved slider captcha2: {captcha2}")
+            if STRATEGY_CAPTCHA_PARALLEL_PREHEAT and _remaining_budget_seconds(target_dt) > PREHEAT_MIN_BUDGET_SECONDS:
+                parallel_results = ["", ""]
 
-            captcha3 = s.resolve_captcha("slide")
-            if not captcha3:
-                logging.warning(
-                    "[strategic] Third slider captcha failed or empty, retrying once more"
+                def _parallel_preheat(slot_idx: int, cap_name: str):
+                    try:
+                        solver = _build_parallel_solver()
+                        parallel_results[slot_idx] = _resolve_captcha_with_deadline(
+                            "slide",
+                            cap_name,
+                            target_dt,
+                            solver=solver,
+                        )
+                    except Exception as e:
+                        logging.warning(f"[strategic] Parallel preheat {cap_name} failed: {e}")
+
+                t1 = threading.Thread(
+                    target=_parallel_preheat,
+                    args=(0, "First"),
+                    daemon=True,
+                    name="captcha-preheat-1",
                 )
-                captcha3 = s.resolve_captcha("slide")
-            logging.info(f"[strategic] Pre-resolved slider captcha3: {captcha3}")
+                t2 = threading.Thread(
+                    target=_parallel_preheat,
+                    args=(1, "Second"),
+                    daemon=True,
+                    name="captcha-preheat-2",
+                )
+                logging.info("[strategic] Start parallel captcha preheat for First/Second")
+                t1.start()
+                t2.start()
+                t1.join(timeout=max(0.1, _remaining_budget_seconds(target_dt)))
+                t2.join(timeout=max(0.1, _remaining_budget_seconds(target_dt)))
+                slider_captchas.extend([c for c in parallel_results if c])
+
+            for cap_name in ["Third"] if slider_captchas else ["First", "Second", "Third"]:
+                remain_s = _remaining_budget_seconds(target_dt)
+                if remain_s < PREHEAT_MIN_BUDGET_SECONDS:
+                    if slider_captchas:
+                        logging.info(
+                            f"[strategic] Remaining budget {remain_s:.2f}s < {PREHEAT_MIN_BUDGET_SECONDS:.0f}s; already have captcha, stop preheating more"
+                        )
+                        break
+                    logging.warning(
+                        f"[strategic] Remaining budget {remain_s:.2f}s < {PREHEAT_MIN_BUDGET_SECONDS:.0f}s and no captcha yet; force one immediate preheat"
+                    )
+
+                cap = _resolve_captcha_with_deadline("slide", cap_name, target_dt)
+                if cap:
+                    slider_captchas.append(cap)
+                logging.info(
+                    f"[strategic] Pre-resolved slider captcha{len(slider_captchas)} (attempt {cap_name}): {cap}"
+                )
+
+            captcha1, captcha2, captcha3 = _fill_captcha_slots(slider_captchas)
+            logging.info(
+                f"[strategic] Slider preheat summary: prepared={len([c for c in slider_captchas if c])}, "
+                f"captcha1={'yes' if captcha1 else 'no'}, captcha2={'yes' if captcha2 else 'no'}, captcha3={'yes' if captcha3 else 'no'}"
+            )
         elif ENABLE_TEXTCLICK:
             # 选字验证：预先获取三份 validate（循环重试直到成功）
             def get_textclick_with_retry(name: str, max_retries: int = 10) -> str:
                 for i in range(max_retries):
+                    if _beijing_now() >= target_dt:
+                        logging.warning(
+                            f"[strategic] Stop pre-resolving {name} textclick captcha: reached target time"
+                        )
+                        return ""
                     captcha = s.resolve_captcha("textclick")
                     if captcha:
                         logging.info(f"[strategic] {name} textclick captcha resolved: {captcha}")
@@ -281,8 +409,24 @@ def strategic_first_attempt(
                 logging.error(f"[strategic] {name} textclick captcha failed after {max_retries} retries")
                 return ""
 
-            captcha1 = get_textclick_with_retry("First")
-            captcha2 = get_textclick_with_retry("Second")
+            textclick_captchas: list[str] = []
+            for cap_name in ["First", "Second", "Third"]:
+                remain_s = _remaining_budget_seconds(target_dt)
+                if remain_s < PREHEAT_MIN_BUDGET_SECONDS:
+                    if textclick_captchas:
+                        logging.info(
+                            f"[strategic] Remaining budget {remain_s:.2f}s < {PREHEAT_MIN_BUDGET_SECONDS:.0f}s; already have textclick captcha, stop preheating more"
+                        )
+                        break
+                    logging.warning(
+                        f"[strategic] Remaining budget {remain_s:.2f}s < {PREHEAT_MIN_BUDGET_SECONDS:.0f}s and no textclick captcha yet; force one immediate preheat"
+                    )
+
+                cap = get_textclick_with_retry(cap_name)
+                if cap:
+                    textclick_captchas.append(cap)
+
+            captcha1, captcha2, captcha3 = _fill_captcha_slots(textclick_captchas)
 
         # token URL 供所有 3 次提交复用
         # 使用当天日期获取页面 token，避免预约日尚未开放导致页面报错拿不到 submit_enc
@@ -886,6 +1030,7 @@ if __name__ == "__main__":
         BURST_OFFSETS_MS             = strategy_cfg.get("burst_offsets_ms", [120, 420, 820])  # 仅 burst
         # mode=C 预热取 token 参数
         TOKEN_FETCH_DELAY_MS         = int(strategy_cfg.get("token_fetch_delay_ms", 50))   # 目标时间后多少 ms 取 token
+        STRATEGY_CAPTCHA_PARALLEL_PREHEAT = bool(strategy_cfg.get("captcha_parallel_preheat", True))
 
         # 控制是否在每一轮主循环中都重新登录
         RELOGIN_EVERY_LOOP = bool(config.get("relogin_every_loop", RELOGIN_EVERY_LOOP))
