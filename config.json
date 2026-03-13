@@ -2,15 +2,35 @@
     "relogin_every_loop": false,
     "reserve": [
 
+{
+            "username": "",
+            "password": "",
+            "times": ["16:45", "21:00"],
+            "roomid": "3",
+            "seatid": ["122"],
+            "seatPageId": "3",
+            "fidEnc": "81bc48ef971aa3f8",
+            "daysofweek": ["Monday", "Wednesday", "Thursday", "Friday"]
+        },
         {
             "username": "",
             "password": "",
-            "times": ["09:00", "23:00"],
-            "roomid": "13484",
-            "seatid": ["356"],
-            "seatPageId": "13484",
-            "fidEnc": "4a18e12602b24c8c",
-            "daysofweek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            "times": ["10:00", "15:00"],
+            "roomid": "3",
+            "seatid": ["122"],
+            "seatPageId": "3",
+            "fidEnc": "81bc48ef971aa3f8",
+            "daysofweek": [ "Tuesday"]
+        },
+        {
+            "username": "",
+            "password": "",
+            "times": ["10:00", "20:00"],
+            "roomid": "3",
+            "seatid": ["122"],
+            "seatPageId": "3",
+            "fidEnc": "81bc48ef971aa3f8",
+            "daysofweek": ["Saturday", "Sunday"]
         }
     ],
 
