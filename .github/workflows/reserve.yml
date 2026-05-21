@@ -64,6 +64,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run reserve script
+        id: run_reserve
+        continue-on-error: true
         env:
           CX_USERNAME: ${{ secrets.CX_USERNAME }}
           CX_PASSWORD: ${{ secrets.CX_PASSWORD }}
@@ -80,6 +82,7 @@ jobs:
           python main.py --action --dispatch 2>&1 | tee reserve.log
           code="${PIPESTATUS[0]}"
           echo "RESERVE_ACTION_RETURN_CODE=${code}" >> "$GITHUB_ENV"
+          echo "return_code=${code}" >> "$GITHUB_OUTPUT"
           exit "$code"
 
       - name: Report reserve result to center (dispatch)
@@ -90,6 +93,7 @@ jobs:
           RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
         run: |
           export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
+          echo "result center configured: url=$([[ -n \"$RESERVE_RESULT_CENTER_URL\" ]] && echo yes || echo no), token=$([[ -n \"$RESERVE_RESULT_REPORT_TOKEN\" ]] && echo yes || echo no)"
           python scripts/report_github_reserve_result.py --log reserve.log || true
 
       - name: Extract key logs
@@ -158,6 +162,12 @@ jobs:
           status_code="$(curl -sS -o /tmp/feishu_resp.txt -w '%{http_code}' -X POST "$webhook" -H 'Content-Type: application/json' -d "$payload" || true)"
           echo "Feishu response code: ${status_code}"
           cat /tmp/feishu_resp.txt || true
+
+      - name: Mark reserve result failed (dispatch)
+        if: ${{ always() && steps.run_reserve.outputs.return_code != '' && steps.run_reserve.outputs.return_code != '0' }}
+        run: |
+          echo "Reserve script failed with exit code ${RESERVE_ACTION_RETURN_CODE:-${{ steps.run_reserve.outputs.return_code }}}"
+          exit "${RESERVE_ACTION_RETURN_CODE:-${{ steps.run_reserve.outputs.return_code }}}"
 
   forward-dispatch:
     name: forward-dispatch-to-server
@@ -256,6 +266,8 @@ jobs:
           cat /tmp/feishu_resp_test.txt || true
 
       - name: Run reserve script (manual)
+        id: run_reserve_manual
+        continue-on-error: true
         if: ${{ github.event.inputs.test_feishu_only != 'true' }}
         env:
           CX_USERNAME: ${{ secrets.CX_USERNAME }}
@@ -272,6 +284,7 @@ jobs:
           python main.py --action 2>&1 | tee reserve.log
           code="${PIPESTATUS[0]}"
           echo "RESERVE_ACTION_RETURN_CODE=${code}" >> "$GITHUB_ENV"
+          echo "return_code=${code}" >> "$GITHUB_OUTPUT"
           exit "$code"
 
       - name: Report reserve result to center (manual)
@@ -281,6 +294,7 @@ jobs:
           RESERVE_RESULT_REPORT_TOKEN: ${{ secrets.RESERVE_RESULT_REPORT_TOKEN }}
         run: |
           export RESERVE_ACTION_RETURN_CODE="${RESERVE_ACTION_RETURN_CODE:-0}"
+          echo "result center configured: url=$([[ -n \"$RESERVE_RESULT_CENTER_URL\" ]] && echo yes || echo no), token=$([[ -n \"$RESERVE_RESULT_REPORT_TOKEN\" ]] && echo yes || echo no)"
           python scripts/report_github_reserve_result.py --log reserve.log || true
 
       - name: Extract key logs (manual)
@@ -349,3 +363,9 @@ jobs:
           status_code="$(curl -sS -o /tmp/feishu_resp.txt -w '%{http_code}' -X POST "$webhook" -H 'Content-Type: application/json' -d "$payload" || true)"
           echo "Feishu response code: ${status_code}"
           cat /tmp/feishu_resp.txt || true
+
+      - name: Mark reserve result failed (manual)
+        if: ${{ always() && github.event.inputs.test_feishu_only != 'true' && steps.run_reserve_manual.outputs.return_code != '' && steps.run_reserve_manual.outputs.return_code != '0' }}
+        run: |
+          echo "Reserve script failed with exit code ${RESERVE_ACTION_RETURN_CODE:-${{ steps.run_reserve_manual.outputs.return_code }}}"
+          exit "${RESERVE_ACTION_RETURN_CODE:-${{ steps.run_reserve_manual.outputs.return_code }}}"
