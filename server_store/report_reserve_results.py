@@ -126,6 +126,8 @@ def normalize_time_range(start: Any, end: Any) -> str:
 
 
 def time_range_from_text(value: Any) -> str:
+    if isinstance(value, list) and len(value) >= 2:
+        return normalize_time_range(value[0], value[1])
     text = normalize_text(value, 80).replace("~", "-").replace("—", "-").replace("–", "-")
     if "-" not in text:
         return ""
@@ -270,28 +272,35 @@ def extract_seat_reserve(result: Any) -> dict:
     return seat_reserve if isinstance(seat_reserve, dict) else {}
 
 
+def is_successful_reserve_result(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return False
+    seat_reserve = extract_seat_reserve(result)
+    return bool(normalize_text(seat_reserve.get("seatNum"), 80))
+
+
 def success_seat_from_attempt(attempt: dict) -> str:
     result = attempt.get("result") if isinstance(attempt.get("result"), dict) else {}
-    if result.get("success") is not True:
+    if not is_successful_reserve_result(result):
         return ""
     seat_reserve = extract_seat_reserve(result)
-    return normalize_text(seat_reserve.get("seatNum") or attempt.get("seatNum"), 80)
+    return normalize_text(seat_reserve.get("seatNum"), 80)
 
 
 def success_room_from_attempt(attempt: dict) -> str:
     result = attempt.get("result") if isinstance(attempt.get("result"), dict) else {}
-    if result.get("success") is not True:
+    if not is_successful_reserve_result(result):
         return ""
     seat_reserve = extract_seat_reserve(result)
-    return normalize_text(seat_reserve.get("roomId") or attempt.get("roomId"), 80)
+    return normalize_text(seat_reserve.get("roomId"), 80)
 
 
 def success_day_from_attempt(attempt: dict) -> str:
     result = attempt.get("result") if isinstance(attempt.get("result"), dict) else {}
-    if result.get("success") is not True:
+    if not is_successful_reserve_result(result):
         return ""
     seat_reserve = extract_seat_reserve(result)
-    return normalize_text(seat_reserve.get("today") or attempt.get("day"), 32)
+    return normalize_text(seat_reserve.get("today"), 32)
 
 
 def success_location_from_attempt(attempt: dict) -> dict:
@@ -554,7 +563,7 @@ def build_result(run_dir: pathlib.Path, summary: dict, payload: dict, item: dict
         (
             attempt
             for attempt in attempts
-            if isinstance(attempt.get("result"), dict) and attempt["result"].get("success") is True
+            if is_successful_reserve_result(attempt.get("result"))
         ),
         None,
     )
@@ -567,7 +576,7 @@ def build_result(run_dir: pathlib.Path, summary: dict, payload: dict, item: dict
     successful_attempts = [
         attempt
         for attempt in attempts
-        if isinstance(attempt.get("result"), dict) and attempt["result"].get("success") is True
+        if is_successful_reserve_result(attempt.get("result"))
     ]
     final_seat = unique_join([success_seat_from_attempt(attempt) for attempt in successful_attempts])
     if not final_seat:
@@ -594,11 +603,14 @@ def build_result(run_dir: pathlib.Path, summary: dict, payload: dict, item: dict
         attempt_seat = normalize_text(attempt.get("seatNum"), 80)
         primary_seats = slot.get("primary") or []
         backup_seats = slot.get("backup") or []
-        success = bool(result.get("success") is True)
+        success = is_successful_reserve_result(result)
         message = normalize_text(result.get("msg") if isinstance(result, dict) else "", 240)
         final_attempt_seat = success_seat_from_attempt(attempt) if success else ""
         source_seat = final_attempt_seat if success else attempt_seat
-        source = "primary" if source_seat and source_seat in primary_seats else "backup" if source_seat and source_seat in backup_seats else "unknown"
+        if success:
+            source = "primary" if source_seat and source_seat in primary_seats else "backup"
+        else:
+            source = "primary" if source_seat and source_seat in primary_seats else "backup" if source_seat and source_seat in backup_seats else "unknown"
         location = success_location_from_attempt(attempt) if success else {}
         if success:
             result_text = "首抢成功" if source == "primary" else "备选成功" if source == "backup" else "成功"
@@ -643,6 +655,7 @@ def build_result(run_dir: pathlib.Path, summary: dict, payload: dict, item: dict
             attempt
             for attempt in attempt_results
             if (slot_time and attempt.get("time") == slot_time)
+            or (not slot_time and len(visible_slots) == 1)
             or (not slot_time and attempt.get("attemptSeat") in primary_seats + backup_seats)
         ]
         success_detail = next((attempt for attempt in related_attempts if attempt.get("success")), None)
